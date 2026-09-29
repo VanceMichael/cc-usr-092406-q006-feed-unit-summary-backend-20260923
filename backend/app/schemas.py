@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date, datetime
 
@@ -90,7 +90,12 @@ class FeedingRecordBase(BaseModel):
     batch_id: int
     feeding_date: date
     feed_type: str
-    feed_quantity: float
+    # 新口径：原始数量 + 原始单位(bag/g/kg) + 当时包装标注
+    raw_quantity: Optional[float] = None
+    raw_unit: Optional[str] = None
+    package_label: Optional[str] = None
+    # 旧口径兼容：只给 feed_quantity 时按公斤受理
+    feed_quantity: Optional[float] = None
     feeding_time: Optional[str] = None
     weather: Optional[str] = None
     water_temperature: Optional[float] = None
@@ -103,18 +108,46 @@ class FeedingRecordUpdate(BaseModel):
     batch_id: Optional[int] = None
     feeding_date: Optional[date] = None
     feed_type: Optional[str] = None
+    raw_quantity: Optional[float] = None
+    raw_unit: Optional[str] = None
+    package_label: Optional[str] = None
     feed_quantity: Optional[float] = None
     feeding_time: Optional[str] = None
     weather: Optional[str] = None
     water_temperature: Optional[float] = None
     notes: Optional[str] = None
 
-class FeedingRecordResponse(FeedingRecordBase):
+class MeasurementBrief(BaseModel):
+    status: str
+    quantity_kg: Optional[float] = None
+    review_reason: Optional[str] = None
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+    spec_version_id: Optional[int] = None
+    spec_version_no: Optional[int] = None
+    spec_effective_from: Optional[date] = None
+    package_label: Optional[str] = None
+    calculated_at: Optional[datetime] = None
+
+class FeedingRecordResponse(BaseModel):
     id: int
+    batch_id: int
+    feeding_date: date
+    feed_type: str
+    feed_quantity: Optional[float] = None
+    raw_quantity: Optional[float] = None
+    raw_unit: Optional[str] = None
+    package_label: Optional[str] = None
+    signed_off: bool = False
+    feeding_time: Optional[str] = None
+    weather: Optional[str] = None
+    water_temperature: Optional[float] = None
+    notes: Optional[str] = None
     created_at: datetime
+    measurement: Optional[MeasurementBrief] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class WaterQualityRecordBase(BaseModel):
     batch_id: int
@@ -259,6 +292,143 @@ class FeedingSummaryItem(BaseModel):
     total_quantity: float
     feeding_count: int
 
+
+# ---------------------------------------------------------------------------
+# 产品规格与计量链
+# ---------------------------------------------------------------------------
+
+class FeedProductCreate(BaseModel):
+    canonical_name: str
+    aliases: Optional[List[str]] = None
+
+class FeedProductResponse(BaseModel):
+    id: int
+    canonical_name: str
+    status: str
+    merged_into_id: Optional[int] = None
+    aliases: List[str] = []
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class FeedAliasCreate(BaseModel):
+    alias: str
+
+class FeedVersionCreate(BaseModel):
+    kg_per_bag: float = Field(..., description="每袋净重(公斤), 必须为正")
+    effective_from: date
+    package_label: Optional[str] = None
+
+class FeedVersionResponse(BaseModel):
+    id: int
+    product_id: int
+    version: int
+    package_label: Optional[str] = None
+    kg_per_bag: float
+    effective_from: date
+    effective_to: Optional[date] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class FeedVersionCorrectRequest(BaseModel):
+    kg_per_bag: Optional[float] = Field(None, description="更正后的每袋净重(公斤), 必须为正")
+    package_label: Optional[str] = None
+
+class SameNameAdjudicationRequest(BaseModel):
+    source_product_id: int
+    target_product_id: int
+
+class SameNameAdjudicationResponse(BaseModel):
+    merged_product_id: int
+    target_product_id: int
+    relocated_aliases: int
+    recalculated_records: List[int]
+
+
+class ReviewItemResponse(BaseModel):
+    id: int
+    record_id: int
+    reason: str
+    candidates_json: Optional[str] = None
+    status: str
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    resolution_note: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class ReviewResolveRequest(BaseModel):
+    # 人工复核结论：指明该记录归并到哪个产品（必须已存在）；
+    # 系统只按该产品投喂日的生效规格重算，绝不接受人工猜测的换算比例。
+    product_id: int
+    note: Optional[str] = None
+
+
+class RecalcJobResponse(BaseModel):
+    id: int
+    scope: str
+    params: Optional[dict] = None
+    status: str
+    total: int
+    processed: int
+    unchanged: int
+    to_review: int
+    skipped_signed: int
+    last_id: int
+    finished_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+class RecalcJobCreateRequest(BaseModel):
+    scope: str = "all"
+    product_id: Optional[int] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    batch_size: int = 100
+
+
+class FeedingBreakdownItem(BaseModel):
+    feed_type: str
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+    spec_version_no: Optional[int] = None
+    total_kg: float
+    feeding_count: int
+    review_count: int
+
+class VarianceLine(BaseModel):
+    """单条记录对某口径差额的贡献，可回溯到原记录。"""
+    record_id: int
+    batch_id: int
+    feeding_date: date
+    feed_type: str
+    raw_quantity: Optional[float] = None
+    raw_unit: Optional[str] = None
+    package_label: Optional[str] = None
+    legacy_kg: Optional[float] = None
+    measured_kg: Optional[float] = None
+    diff_kg: float
+    status: str
+    review_reason: Optional[str] = None
+    spec_version_no: Optional[int] = None
+    signed_off: bool = False
+
+class VarianceReport(BaseModel):
+    batch_id: Optional[int] = None
+    product_id: Optional[int] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    lines: List[VarianceLine] = []
+    legacy_total_kg: float
+    measured_total_kg: float
+    excluded_review_count: int
+    variance_kg: float
+    note: str
+
+
 class CultureCycleAnalysis(BaseModel):
     batch_number: str
     pond_name: str
@@ -278,6 +448,11 @@ class CultureCycleAnalysis(BaseModel):
     profit: float
     cost_summary: Optional[dict] = None
     feeding_summary: Optional[dict] = None
+    # 计量链口径：只统计 status=ok 的换算结果，待复核记录隔离单列
+    feeding_breakdown: List[FeedingBreakdownItem] = []
+    review_pending_count: int = 0
+    feeding_record_count: int = 0
+    measurement_note: Optional[str] = None
 
 class StockingRecordTrace(BaseModel):
     species: str
@@ -289,8 +464,23 @@ class StockingRecordTrace(BaseModel):
 class FeedingRecordTrace(BaseModel):
     feeding_date: date
     feed_type: str
-    quantity: float
+    quantity: Optional[float] = None
     unit: Optional[str] = None
+    # 原始计量三要素
+    raw_quantity: Optional[float] = None
+    raw_unit: Optional[str] = None
+    package_label: Optional[str] = None
+    # 换算结果与逐笔采用的规格版本
+    quantity_kg: Optional[float] = None
+    measurement_status: str = "review"
+    review_reason: Optional[str] = None
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+    spec_version_id: Optional[int] = None
+    spec_version_no: Optional[int] = None
+    spec_effective_from: Optional[date] = None
+    spec_kg_per_bag: Optional[float] = None
+    signed_off: bool = False
 
 class WaterQualityRecordTrace(BaseModel):
     record_date: date
